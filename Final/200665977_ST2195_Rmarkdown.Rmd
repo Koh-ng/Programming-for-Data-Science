@@ -1,0 +1,563 @@
+---
+title: "ST2195_Coursework"
+author: "Khoi"
+candidate number: "200665977"
+date: "12/23/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# ST2195 Programming for Data Science
+
+## Coursework Project
+
+## Import Data and Packages
+
+```{r}
+# For data wrangling
+library (dplyr)
+library(data.table)
+library(reshape2)
+library(skimr)
+# For plotting
+library(maps)
+library (ggplot2)
+library(sf)
+library(usmap)
+library(patchwork)
+library(plotly)
+# Machine Learning
+library(mlr3)
+library(mlr3learners)
+library(mlr3pipelines)
+library(mlr3tuning)
+library(paradox)
+library(ranger)
+```
+
+```{r}
+pwd <- getwd()
+```
+
+```{r}
+data_2000 <- read.csv(paste(pwd, "CourseWork_Data/2000.csv",sep ="/"), header = T)
+data_1999 <- read.csv(paste(pwd, "CourseWork_Data/1999.csv",sep ="/"), header = T)
+flightinfo <- rbind(data_1999, data_2000)
+head(flightinfo)
+```
+
+```{r}
+airports <- read.csv(paste(pwd, "CourseWork_Data/airports.csv",sep ="/"), header = T)
+carriers <- read.csv(paste(pwd, "CourseWork_Data/carriers.csv",sep ="/"), header = T)
+plane_data <- read.csv(paste(pwd, "CourseWork_Data/plane-data.csv",sep ="/"), header = T)
+var_dcpt <- read.csv(paste(pwd, "CourseWork_Data/variable-descriptions.csv",sep ="/"), header = T)
+```
+
+Overview the data by using skim() function from "skimr" package.
+
+```{r}
+skim(flightinfo)
+```
+
+Duplicate the original data in order to protect the integrity of dataset.
+
+```{r}
+flightinfo_modified <- data.frame(flightinfo)
+```
+
+## Data Wrangling
+
+Firstly, let's see how many records are there in the data we have.
+
+```{r}
+nrow(flightinfo_modified)
+```
+
+Then, we check if there is any missing value or not and observe some of the records in the data.
+
+```{r}
+colSums(is.na(flightinfo_modified))
+```
+
+```{r}
+head(flightinfo_modified)
+```
+
+As observing from the above result, the DepTime value is NA whenever the flight is cancelled (Cancelled = 1). Also, there is a gap between DepTime NA values and ArrTime NA values, which means at some flights, the airplanes took off then diverted (Diverted = 1) so the time they arrived at scheduled destination was not recorded. To be more clear, we count the number of flights that were cancelled or diverted to compare.
+
+```{r}
+c(sum(flightinfo_modified$Cancelled), sum(flightinfo_modified$Diverted), sum(flightinfo_modified$Cancelled, flightinfo_modified$Diverted))
+```
+
+Quick overview
+
+```{r}
+flightinfo_modified <- data.table(flightinfo_modified)
+flightinfo_modified[, .N, , .(DepDelay > 0, ArrDelay > 0)]
+```
+
+As we can see, there are 341801 flights that was cancelled, 10165 + 17644 = 27809 flights that was diverted, 1778114 + 3590096 = 5368210 flights that had arrival delay regardless of departure delay, and 4450164 + 1022947 = 547311 flights that did not have arrival regardless of departure delay.
+
+Since we only focus on the arrival delays from the flights, we can remove flights that have been cancelled or diverted (which causes the missing values in Deptime and ArrTime) and then select what will be needed to analyze.
+
+```{r}
+flightdb <- flightinfo_modified%>% 
+                     filter(Cancelled == 0 & Diverted == 0 & ArrDelay > 0) %>% 
+                     select("Year",
+                            "Month",
+                            "DayofMonth",
+                            "DayOfWeek",
+                            "FlightNum",
+                            "TailNum",
+                            "Origin",
+                            "Dest",
+                            "CRSDepTime",
+                            "CRSArrTime",
+                            "DepTime",
+                            "ArrTime",
+                            "ArrDelay",
+                            "DepDelay")
+
+head(flightdb, n = 10)
+
+```
+
+Then, check if there is any NA value remain in the filtered data.
+
+```{r}
+colSums(is.na(flightdb))
+```
+
+When talking about the delays, what people actually think of is how the actual time they arrive the destination differ from the scheduled time. Even if there is delay in departure time, it is still acceptable as long as the flight arrive on time. Therefore, we may focus on the ArrDelay only.
+
+## Question 1
+
+### The best time of day to minimize delay
+
+```{r}
+flightdb <- flightdb %>% mutate( TimeInterval = case_when(
+                            CRSDepTime < 401 ~"0AM - 4AM",
+                            400 < CRSDepTime & CRSDepTime < 801 ~ "4AM - 8AM",
+                            800 < CRSDepTime & CRSDepTime < 1201 ~ "8AM - 12PM",
+                            1200 < CRSDepTime & CRSDepTime < 1601 ~ "12PM - 4PM",
+                            1600 < CRSDepTime & CRSDepTime < 2001 ~ "4PM - 8PM",
+                            2000 < CRSDepTime & CRSDepTime < 2401 ~ "8PM - 12AM",
+                            CRSDepTime > 2400 ~ "0AM - 4AM"
+))
+head(flightdb)
+```
+
+```{r}
+TimePeriod <- flightdb %>% group_by(TimeInterval) %>% summarize(Avg_delay = mean(ArrDelay), Total_delay = sum(ArrDelay)) %>% arrange(Avg_delay) 
+names(TimePeriod)[1] <- "Time"
+head(TimePeriod)
+```
+
+Visualization
+
+```{r}
+ggplot(TimePeriod, aes (x = factor(Time, level = c("0AM - 4AM","4AM - 8AM","8AM - 12PM","12PM - 4PM","4PM - 8PM","8PM - 12AM")), y = Avg_delay, fill = Time)) + 
+  geom_col() +
+  scale_fill_manual(values=c("midnightblue",
+                             "cornflowerblue",
+                             "blue4",
+                             "dodgerblue4",
+                             "deepskyblue4",
+                             "royalblue1"
+                             )) +
+  geom_text(aes(label = sprintf("%.2f", Avg_delay)),  vjust = -0.25)
+```
+
+### The best day of week to minimize delay
+
+```{r}
+Day_Week <- flightdb %>% group_by(DayOfWeek) %>% summarize(Avg_delay = mean(ArrDelay)) %>% arrange(Avg_delay) 
+print(Day_Week)
+```
+
+Visualization
+
+```{r}
+ggplot(Day_Week, aes (x = DayOfWeek, y = Avg_delay, fill = DayOfWeek)) + 
+  geom_col() + scale_x_continuous(breaks = c(1,2,3,4,5,6,7),labels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")) +
+  geom_text(aes(label = sprintf("%.2f", Avg_delay)),  vjust = -0.25)
+
+```
+
+### The best time of year to minimize delay
+
+```{r}
+TimeOfYear <- flightdb %>% group_by(Month) %>% summarize(Avg_delay = mean(ArrDelay)) %>% arrange(Avg_delay) 
+print(TimeOfYear)
+```
+
+Visualization
+
+```{r}
+ggplot(TimeOfYear, aes (x = Month, y = Avg_delay, fill = Month)) + 
+  geom_col() + 
+  scale_x_continuous(breaks = c(1,2,3,4,5,6,7,8,9,10,11,12),labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul","Aug","Sep","Oct","Nov","Dec")) +
+  geom_text(aes(label = sprintf("%.2f", Avg_delay)),  vjust = -0.25)
+```
+
+## Question 2: Do older planes suffer more delays
+
+```{r}
+plane_data <- transform(plane_data, year = as.numeric(year))
+t1 <- plane_data %>% rename(plane_year=year) %>% filter(!is.na(plane_year) & plane_year < 2001)
+
+q2 <-  flightdb %>% rename(Flight_Year=Year,tailnum=TailNum) %>% 
+  inner_join(t1, by = "tailnum") %>% 
+  group_by(plane_year) %>% 
+  summarize(avg_delay = mean(ArrDelay), num_of_delay = n()) %>% 
+  arrange(desc(avg_delay))
+print(head(q2, 10))
+```
+
+```{r}
+ggplot(q2, aes(x = plane_year, y = avg_delay)) +
+  geom_jitter() + 
+  geom_smooth(method=lm)
+```
+
+```{r}
+ggplot(q2, aes(x = plane_year, y = num_of_delay, col = plane_year)) +
+  geom_jitter() + 
+  geom_smooth(method=lm)
+```
+
+## Question 3: How does the number of people flying between different locations change over time?
+
+In the data, it did not record exactly how many people there are in a flight. So to analyze the number of people flying between different locations, we may focus on the number of flights instead.
+
+Firstly, check if there is any flight that has the destination at other countries.
+
+```{r}
+flightinfo %>% inner_join(airports, by = c("Dest" = "iata")) %>%
+  filter(Cancelled == 0, country != "USA")
+
+```
+
+As we can see, there is no flight that is out of the US. Hence, we can count the number of flights in different states of the US only.
+
+```{r}
+q3 <- flightinfo_modified %>% inner_join(airports, by = c("Dest" = "iata")) %>%
+  filter(Cancelled == 0) %>% group_by(state, Year) %>% summarise(NumOfFlight = n()) %>%  arrange(desc(NumOfFlight)) %>% na.omit()
+head(q3)
+```
+
+```{r}
+flight_state <- q3 %>%  dcast(formula = state ~ Year, value.var = 'NumOfFlight') %>% rename(flight2000 = "2000", flight1999 = "1999") %>% mutate (gap = flight2000 - flight1999) %>% arrange(desc(flight1999, flight2000))
+flight_state <- data.table(flight_state)
+head(flight_state)
+```
+
+Let's have a quick overview on the number of flights of different states that we created above.
+
+Compare the total flights in 2000 and 1999.
+
+```{r}
+print(paste("The total of flights in 2000 minus the flights in 1999 is:", as.character(sum(flight_state$gap))))
+```
+
+State(s) that have more flights came in.
+
+```{r}
+moreflightstates <- flight_state[gap > 0][order(-gap)]
+moreflightstates
+```
+
+State(s) that have less or no changing inbound flights.
+
+```{r}
+lessflightstates <-flight_state[gap <= 0][order(gap)]
+lessflightstates$gap <- abs(lessflightstates$gap)
+lessflightstates
+```
+
+### Visualization
+
+Since the Data is about the flights in USA only (checked above), we can use the "usmap" package to make the visualization.
+
+```{r}
+viz1999 <- plot_usmap(data = flight_state, values = "flight1999", color = "red") + scale_fill_continuous(low = "white", high = "red", label = scales::comma, name = "Number of people flew in 1999") + theme(legend.position = c(0.5, -0.55)) 
+
+viz2000 <- plot_usmap(data = flight_state ,values = "flight2000", color = "BLACK") + scale_fill_continuous(low = "white", high = "BLUE", label = scales::comma, name = "Number of people flew in 2000") + theme(legend.position = c(0.5, -0.55)) 
+
+viz1999 + viz2000
+```
+
+Draw a map show the difference of inbound flights of states.
+
+```{r}
+pos_state <- plot_usmap(data = moreflightstates ,values = "gap", color = "BLACK" ) + scale_fill_continuous(low = "white", high = "Green", label = scales::comma, name = "More flights between 1999 and 2000") + theme(legend.position = c(0.4, -0.5)) 
+
+
+neg_state <- plot_usmap(data = lessflightstates  ,values = "gap", color = "Black") + scale_fill_continuous(low = "White", high = "Blue", label = scales::comma, name = "Less flights between 1999 and 2000") + theme(legend.position = c(0.4, -0.5)) 
+
+pos_state + neg_state
+
+```
+
+## Question 4: Detecting cascading failures as delays in one airport create delays in others
+
+### Analyzing
+
+Find the aircraft that used the most.
+
+```{r}
+aircraft <- flightinfo_modified[Cancelled != 1, .N, by = .(TailNum)][order(-N)]
+
+head(aircraft)
+```
+
+According to the number of flights, the aircraft N513 was used the most. Then, we may take a look at its routine only.
+
+```{r}
+aircraft513 <- flightinfo_modified[Cancelled != 1 & Diverted != 1 & TailNum == "N513"][order(Year, Month, DayofMonth, CRSDepTime)] %>% select("Year","Month","DayofMonth", "CRSDepTime", "CRSArrTime", "DepDelay", "ArrDelay")
+head(aircraft513, n = 20)
+```
+
+Observing from the data above, it seems that the departure delay and arrival delay have strong relationship for aircraft 513. As we can see, whenever there is a departure delay, it also has a arrival delay. We can calculate the proportion of the flights which take off late and also arrive late using the entire data.
+
+```{r}
+nrow(subset(flightinfo_modified, DepDelay > 0 & ArrDelay > 0)) / nrow(subset(flightinfo_modified,DepDelay > 0))
+
+```
+
+There is 77.5% that a flight takes off late in the original airport creates the delay in arrival time in another airport.
+
+Then, we count the number of flights that has delay propagation per departure airports.
+
+```{r}
+airport_flightnum <- flightinfo_modified[DepDelay > 0 & ArrDelay > 0, .N, by = .(Origin)]
+names(airport_flightnum)[2] <- "NumberOfFlight"
+head(airport_flightnum[order(-NumberOfFlight)])
+```
+
+The number of airports that affected by one particular airports.
+
+```{r}
+airportaffected <- flightinfo_modified[DepDelay > 0 & ArrDelay > 0, length(unique(Dest)), by = .(Origin)]
+names(airportaffected)[2] <- "NumberOfAirport"
+airportaffected[order(-NumberOfAirport)]
+```
+
+```{r}
+airportaffected %>% inner_join(airport_flightnum, by = "Origin") %>% arrange(desc(NumberOfAirport))
+```
+
+### Data for graphing network
+
+Select the top frequently routes that have delay cascading in departure time and arrival time (i.e. The flights took off late which causes the arrival late).
+
+```{r}
+toproutes <- flightinfo_modified[DepDelay > 0 & ArrDelay > 0, .N, by = .(Origin,Dest)][order (-N)]
+toproutes <- toproutes[N > mean(N)]
+names(toproutes)[3] <- "NumberOfFlight"
+head(toproutes)
+```
+
+```{r}
+position <- airports[, c("iata","long", "lat")]
+head(position)
+
+```
+
+```{r}
+toproutesfinal <- toproutes %>%  merge(position, by.x = "Origin", by.y = "iata", all.x = T) %>% rename(start_lat = lat, start_lon = long) %>% merge( position, by.x = "Dest", by.y = "iata", all.x = T) %>% rename(end_lat = lat, end_lon = long)
+
+head(toproutesfinal)
+```
+
+The airports that only occur in the "toproutesfinal" data.
+
+```{r}
+uniairports <- unique(data.frame(airports = c(toproutesfinal$Origin, toproutesfinal$Dest)))
+uniairports
+```
+
+```{r}
+airportdata <- airports %>% filter (iata %in% uniairports$airports)
+head(airportdata)
+```
+
+## Visualization
+
+```{r}
+toproutesfinal$id <- seq_len(nrow(toproutesfinal))
+geo <- list(
+  scope = 'north america',
+  projection = list(type = 'azimuthal equal area'),
+  showland = TRUE,
+  landcolor = toRGB("gray95"),
+  countrycolor = toRGB("gray80")
+)
+
+fig <- plot_geo(locationmode = 'USA-states', color = I("red"))
+fig <- fig %>% add_markers(
+  data = airportdata, x = ~long, y = ~lat, text = ~airport, hoverinfo = "text", alpha = 0.5
+)
+fig <- fig %>% add_segments(
+    data = toproutesfinal,
+    x = ~start_lon, xend = ~end_lon,
+    y = ~start_lat, yend = ~end_lat,
+    alpha = 0.3, size = I(1), hoverinfo = "none", text = ~NumberOfFlight
+  )
+fig <- fig %>% layout(
+    title = 'Airports Network Interaction',
+    geo = geo, showlegend = FALSE, height=800
+  )
+
+fig
+```
+
+## Question 5: Model that predicts delays
+
+Preference: [https://medium.com/\@pranaysawant22/airline-on-time-performance-9520d9f2d72b\#:\~:text=the%20same%20aspect.-,Can%20you%20detect%20cascading%20failures%20as%20delays%20in%20one%20airport,Yes.](https://medium.com/@pranaysawant22/airline-on-time-performance-9520d9f2d72b#:~:text=the%20same%20aspect.-,Can%20you%20detect%20cascading%20failures%20as%20delays%20in%20one%20airport,Yes.)
+
+### Pre-processing data
+
+Selecting variables (features) that used to predict arrival delay, also apply filter to remove missing value.
+
+```{r}
+variables <- c("Month", "DayofMonth", "DayOfWeek","CRSDepTime","CRSArrTime", "ArrDelay","UniqueCarrier","Origin","Dest", "Distance")
+df <- flightinfo_modified[Cancelled != 1 & Diverted != 1, ..variables]
+df$UniqueCarrier <- factor(df$UniqueCarrier)
+df$Origin <- factor(df$Origin)
+df$Dest <- factor(df$Dest)
+df$Month <- factor(df$Month)
+df$DayofMonth <- factor(df$DayofMonth)
+df$DayOfWeek <- factor(df$DayOfWeek)
+head(df)
+```
+
+Checking if there is any missing value or not
+
+```{r}
+colSums(is.na(df))
+```
+
+Since there is not any missing value, we do not have to impute the missing values.
+
+```{r}
+round(0.01 * nrow(df),0)
+```
+
+### Reducing the size of set
+
+Since the whole data is quite large that requires long time and strong system to run. Hence, we will reduce it size by taking a sample size 100000 of the original data.
+
+```{r}
+set.seed(1)
+df <- sample_n(df,round(0.01 * nrow(df),0))
+df
+```
+
+### Modelling
+
+#### Getting training and test sets
+
+```{r}
+set.seed(1)
+n <- nrow(df)
+train_set <- sample(n, round(0.7*n))
+test_set <- setdiff(1:n, train_set)
+```
+
+```{r}
+lrn()
+```
+
+#### Task setup
+
+```{r}
+task <- TaskRegr$new(id = 'flight', backend = df, target = 'ArrDelay')
+```
+
+```{r}
+measure <- msr('regr.mse')
+
+```
+
+```{r}
+#Encoding factor
+fencoder <- po("encode", method="treatment",
+               affect_columns=selector_type("factor"))
+```
+
+### Random Forests
+
+```{r}
+learner_rf <- lrn('regr.ranger') 
+gc_rf <- fencoder%>>% po('scale') %>>% po(learner_rf)
+glrn_rf <- GraphLearner$new(gc_rf)
+
+
+glrn_rf$train(task, row_ids = train_set)
+glrn_rf$predict(task, row_ids = test_set)$score()
+
+```
+
+### Linear Regression
+
+```{r}
+learner_lm <- lrn('regr.lm')
+gc_lm <- fencoder%>>% po('scale') %>>% po(learner_lm)
+glrn_lm <- GraphLearner$new(gc_lm)
+
+glrn_lm$train(task, row_ids = train_set)
+glrn_lm$predict(task, row_ids = test_set)$score() 
+```
+
+### Ridge Regression
+
+```{r}
+learner_ridge <- lrn('regr.glmnet') 
+learner_ridge$param_set$values <- list(alpha = 0, lambda = 0.03)
+gc_ridge <- fencoder%>>% po('scale') %>>% po(learner_ridge)
+glrn_ridge<- GraphLearner$new(gc_ridge)
+
+glrn_ridge$train(task, row_ids = train_set)
+glrn_ridge$predict(task, row_ids = test_set)$score() 
+```
+
+### Support Vector Regression (Additional) - But take long time to run in laptop
+
+    regr.glmnet, regr.kknn, regr.km, regr.lm, regr.ranger, regr.rpart, regr.svm, regr.xgboost
+
+```{r}
+learner_svm <- lrn('regr.svm') 
+gc_svm <- fencoder %>>% po(learner_svm)
+glrn_svm<- GraphLearner$new(gc_svm)
+
+glrn_svm$train(task, row_ids = train_set)
+glrn_svm$predict(task, row_ids = test_set)$score() 
+```
+
+### Comparing model
+
+```{r}
+set.seed(1) # for reproducible results
+
+# List of learners
+lrn_list <- list(
+  glrn_rf,
+  glrn_lm,
+  glrn_ridge
+)
+
+# Set the benchmark design and run the comparisons
+bm_design <- benchmark_grid(task=task, resamplings=rsmp('cv', folds=3), 
+                            learners=lrn_list)
+bmr <- benchmark(bm_design, store_models=TRUE)
+
+# Visualise comparisons with boxplots
+library(mlr3viz)
+library(ggplot2)
+autoplot(bmr) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Print overall measure for each regression model
+bmr$aggregate(measure)
+```
